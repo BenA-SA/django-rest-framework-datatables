@@ -1,0 +1,36 @@
+name: Django main
+
+on:
+  schedule:
+    # Mondays 06:00 UTC. Advisory early warning for the next Django release.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  django-main:
+    name: Django main (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    # Django main can break through no fault of this package, so a red run here
+    # is a warning to look into, not a broken release.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - '3.13'
+          - '3.14'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Run the Django main environment
+        run: >
+          uvx --with tox-uv tox run
+          -e "py$(echo '${{ matrix.python-version }}' | tr -d .)-djangomain"
