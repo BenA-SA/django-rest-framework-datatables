@@ -31,6 +31,28 @@ def f_search_q(f, search_value, search_regex=False):
     return reduce(operator.or_, qs, Q())
 
 
+def count_rows(queryset):
+    """helper function that counts the rows a queryset would return
+
+    Counting a distinct queryset makes the database dedupe every
+    selected column, joined ones included; deduping the primary key
+    alone gives the same number for much less work. Querysets using
+    DISTINCT ON, selecting only some columns with values() or
+    values_list(), or carrying annotations that would change how rows
+    group, are counted as they were before.
+
+    """
+    countable_by_pk = (
+        queryset.query.distinct
+        and not queryset.query.distinct_fields
+        and not queryset.query.values_select
+        and not queryset.query.annotations
+    )
+    if countable_by_pk:
+        return queryset.order_by().values('pk').distinct().count()
+    return queryset.count()
+
+
 class DatatablesBaseFilterBackend(BaseFilterBackend):
     """Base class for definining your own DatatablesFilterBackend classes"""
 
@@ -137,7 +159,7 @@ class DatatablesBaseFilterBackend(BaseFilterBackend):
         :meth:`~rest_framework_datatables.filters.DatatablesBaseFilterBackend.get_queryset_count_before`.
 
         """
-        return queryset.count()
+        return count_rows(queryset)
 
     def set_count_before(self, view, total_count):
         # set the queryset count as an attribute of the view for later

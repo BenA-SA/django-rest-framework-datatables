@@ -1,8 +1,9 @@
 from albums.models import Album
 from albums.serializers import AlbumSerializer
 
+from django.db import connection
 from django.urls import path
-from django.test.utils import override_settings
+from django.test.utils import CaptureQueriesContext, override_settings
 from django.test import TestCase
 
 from rest_framework.generics import ListAPIView
@@ -13,7 +14,8 @@ from rest_framework.filters import BaseFilterBackend
 from rest_framework_datatables.pagination import (
     DatatablesLimitOffsetPagination,
 )
-from rest_framework_datatables.filters import DatatablesFilterBackend
+from rest_framework_datatables.filters import (
+    DatatablesFilterBackend, count_rows)
 
 
 class CustomFilterBackend(BaseFilterBackend):
@@ -116,6 +118,39 @@ class TestFilterTestCase(TestCase):
         response = self.client.get('/api/customcounts/?format=datatables&length=10&columns[0][data]=name&columns[0][searchable]=true&search[value]=are+you+exp')
         result = response.json()
         self.assertEqual(result['recordsFiltered'], 99)
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_distinct_count_dedupes_the_primary_key(self):
+        """The filtered count should not dedupe every selected column
+
+        A search that reaches a many to many relation makes the queryset
+        distinct, and counting it used to make the database dedupe whole
+        rows.
+
+        """
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get('/api/filter/albums/?format=datatables&length=10&columns[0][data]=name&columns[0][searchable]=true&columns[1][data]=genres.name&columns[1][searchable]=true&search[value]=blues')
+        counts = [
+            query['sql'] for query in queries.captured_queries
+            if query['sql'].upper().startswith('SELECT COUNT')
+        ]
+        self.assertEqual(response.json()['recordsFiltered'], 4)
+        self.assertIn('SELECT DISTINCT', counts[-1])
+        self.assertNotIn('"albums_album"."year"', counts[-1])
+
+    def test_count_rows_keeps_a_values_projection(self):
+        """A distinct projection is counted by the columns it selects
+
+        Counting by primary key would replace the projection, and count
+        albums rather than distinct artists.
+
+        """
+        for queryset in (
+            Album.objects.values('artist').distinct(),
+            Album.objects.values_list('artist', flat=True).distinct(),
+        ):
+            self.assertLess(queryset.count(), Album.objects.count())
+            self.assertEqual(count_rows(queryset), queryset.count())
 
     @override_settings(ROOT_URLCONF=__name__)
     def test_custom_count_unfiltered(self):
