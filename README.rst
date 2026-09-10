@@ -196,9 +196,9 @@ To build the documentation:
 
 .. _tox: http://tox.readthedocs.org/en/latest/
 
-.. |build-status-image| image:: https://api.travis-ci.com/izimobil/django-rest-framework-datatables.svg?branch=master
-   :target: https://app.travis-ci.com/github/izimobil/django-rest-framework-datatables
-   :alt: Travis build
+.. |build-status-image| image:: https://github.com/izimobil/django-rest-framework-datatables/actions/workflows/main.yml/badge.svg?branch=master
+   :target: https://github.com/izimobil/django-rest-framework-datatables/actions/workflows/main.yml
+   :alt: CI status
 
 .. |codecov-image| image:: https://codecov.io/gh/izimobil/django-rest-framework-datatables/branch/master/graph/badge.svg
   :target: https://codecov.io/gh/izimobil/django-rest-framework-datatables
