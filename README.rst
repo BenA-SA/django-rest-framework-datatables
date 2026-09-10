@@ -20,11 +20,13 @@ You can play with a demo of the example app on `Python Anywhere <https://izimobi
 Requirements
 ------------
 
-- Python (3.8, 3.9, 3.10, 3.11, 3.12)
-- Django (3.2, 4.1, 4.2)
-- Django REST Framework (3.14)
+- Python (3.10, 3.11, 3.12, 3.13, 3.14)
+- Django (4.2, 5.2, 6.0, 6.1)
+- Django REST Framework (3.14 and later)
 
 We highly recommend and only officially support the latest patch release of each Python, Django and Django Rest Framework series.
+
+Every combination listed above is exercised by the test suite on each push, and the suite also runs weekly against Django's ``main`` branch as an early warning for the next release.
 
 Quickstart
 ----------
