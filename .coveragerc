@@ -1,2 +1,11 @@
 [run]
 source=rest_framework_datatables
+
+[paths]
+source =
+    rest_framework_datatables
+    .tox/*/lib/python*/site-packages/rest_framework_datatables
+    .tox/*/Lib/site-packages/rest_framework_datatables
+
+[report]
+fail_under = 100
