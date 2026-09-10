@@ -405,6 +405,21 @@ On a very large table, where counting rows is expensive, they can return a cache
 
 Both ``rest_framework_datatables.filters.DatatablesFilterBackend`` and ``rest_framework_datatables.django_filters.backends.DatatablesFilterBackend`` call them.
 
+``DatatablesLimitOffsetPagination`` reuses the backend's count only when neither method is overridden.
+Otherwise it counts the filtered rows again, as Django REST framework's ``LimitOffsetPagination`` does.
+To skip that extra count, set ``use_filter_backend_count`` on a subclass:
+
+.. code:: python
+
+    from rest_framework_datatables.pagination import DatatablesLimitOffsetPagination
+
+
+    class FilterBackendCountPagination(DatatablesLimitOffsetPagination):
+        use_filter_backend_count = True
+
+Only do this if ``get_queryset_count_after()`` never returns less than the real number of rows.
+The paginator returns an empty page for any offset past the count, so an undercount, such as a stale cache or a low estimate, hides rows that exist.
+
 
 Using DataTables via POST method
 --------------------------------

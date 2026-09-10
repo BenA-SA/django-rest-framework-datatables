@@ -7,6 +7,8 @@ from django.test.utils import CaptureQueriesContext, override_settings
 from rest_framework import routers, viewsets
 from rest_framework.filters import BaseFilterBackend
 from rest_framework.test import APIClient, APIRequestFactory
+from rest_framework_datatables.pagination import (
+    DatatablesLimitOffsetPagination)
 
 from albums.models import Album
 from albums.serializers import AlbumSerializer
@@ -220,6 +222,46 @@ class TestCustomUnfiltered(TestWithViewSet):
     def test_count_after(self):
         response = self.client.get('/api/albumsc/?format=datatables&length=10')
         self.assertEqual(response.json()['recordsFiltered'], 99)
+
+
+class FilterBackendCountPagination(DatatablesLimitOffsetPagination):
+    use_filter_backend_count = True
+
+
+class CustomBackendLimitOffsetViewSet(CustomBackendAlbumFilterViewSet):
+    pagination_class = DatatablesLimitOffsetPagination
+
+
+class CustomBackendTrustedCountViewSet(CustomBackendAlbumFilterViewSet):
+    pagination_class = FilterBackendCountPagination
+
+
+class TestCustomLimitOffset(TestWithViewSet):
+    """An overridden count does not decide which rows a page holds
+
+    Unless the paginator opts in, it counts the rows itself, so an
+    override that undercounts cannot empty a page that has rows.
+
+    """
+    query = (
+        '?format=datatables&length=10'
+        '&columns[0][data]=year'
+        '&columns[0][searchable]=true'
+        '&columns[0][search][value]=1971')
+
+    def test_count_after(self):
+        response = self.client.get('/api/albumsclo/' + self.query)
+        self.assertEqual(response.json()['recordsFiltered'], 1)
+
+    def test_opted_in_count_after(self):
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get('/api/albumsct/' + self.query)
+        counts = [
+            query for query in queries.captured_queries
+            if 'COUNT' in query['sql'].upper()
+        ]
+        self.assertEqual(response.json()['recordsFiltered'], 99)
+        self.assertEqual(counts, [])
 
 
 class TestInvalid(TestWithViewSet):
@@ -482,6 +524,10 @@ class TestGlobal(TestWithViewSet):
 router = routers.DefaultRouter()
 router.register(r'albums', AlbumFilterViewSet, basename="albums")
 router.register(r'albumsc', CustomBackendAlbumFilterViewSet, basename="albumsc")
+router.register(
+    r'albumsclo', CustomBackendLimitOffsetViewSet, basename="albumsclo")
+router.register(
+    r'albumsct', CustomBackendTrustedCountViewSet, basename="albumsct")
 router.register(r'albumsr', RecentAlbumViewSet, basename="albumsr")
 router.register(r'albumsn', NoAlbumViewSet, basename="albumsn")
 router.register(r'albumsi', AlbumIcontainsViewSet, basename="albumsi")
