@@ -21,6 +21,18 @@ class CustomFilterBackend(BaseFilterBackend):
         return queryset.filter(name__istartswith='a')
 
 
+class CustomCountFilterBackend(DatatablesFilterBackend):
+    """
+    Override before and after counts to demonstrate performance fix.
+    """
+
+    def get_queryset_count_before(self, request, queryset, view):
+        return 999
+
+    def get_queryset_count_after(self, request, queryset, view):
+        return 99
+
+
 class TestFilterTestCase(TestCase):
     class TestAPIView(ListAPIView):
         serializer_class = AlbumSerializer
@@ -41,6 +53,13 @@ class TestFilterTestCase(TestCase):
     class TestAPIView3(ListAPIView):
         serializer_class = AlbumSerializer
         filter_backends = [DatatablesFilterBackend]
+
+        def get_queryset(self):
+            return Album.objects.all()
+
+    class TestAPIView4(ListAPIView):
+        serializer_class = AlbumSerializer
+        filter_backends = [CustomCountFilterBackend]
 
         def get_queryset(self):
             return Album.objects.all()
@@ -87,6 +106,25 @@ class TestFilterTestCase(TestCase):
         self.assertEqual((result['recordsFiltered'], result['recordsTotal']), expected)
 
     @override_settings(ROOT_URLCONF=__name__)
+    def test_custom_count_before(self):
+        response = self.client.get('/api/customcounts/?format=datatables&length=10&columns[0][data]=name&columns[0][searchable]=true&search[value]=are+you+exp')
+        result = response.json()
+        self.assertEqual(result['recordsTotal'], 999)
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_custom_count_after(self):
+        response = self.client.get('/api/customcounts/?format=datatables&length=10&columns[0][data]=name&columns[0][searchable]=true&search[value]=are+you+exp')
+        result = response.json()
+        self.assertEqual(result['recordsFiltered'], 99)
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_custom_count_unfiltered(self):
+        """An overridden count after filtering is used on every draw"""
+        response = self.client.get('/api/customcounts/?format=datatables&length=10&columns[0][data]=name&columns[0][searchable]=true')
+        result = response.json()
+        self.assertEqual(result['recordsFiltered'], 99)
+
+    @override_settings(ROOT_URLCONF=__name__)
     def test_search_over_filters_backend2(self):
         response = self.client.get('/api/filter/albums/?format=datatables&length=10&columns[0][data]=rank&columns[0][searchable]=false&columns[1][data]=artist.name&columns[1][searchable]=true&columns[2][data]=name&columns[2][searchable]=true&columns[3][data]=year&columns[3][searchable]=true&columns[3][search][value]=1967&columns[4][data]=genres.name&columns[4][searchable]=true&search[value]=Velvet')
         expected = (1, 15)
@@ -98,4 +136,5 @@ urlpatterns = [
     path('api/additionalorderby/', TestFilterTestCase.TestAPIView.as_view()),
     path('api/multiplefilterbackends/', TestFilterTestCase.TestAPIView2.as_view()),
     path('api/filter/albums/', TestFilterTestCase.TestAPIView3.as_view()),
+    path('api/customcounts/', TestFilterTestCase.TestAPIView4.as_view()),
 ]

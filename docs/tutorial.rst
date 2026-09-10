@@ -383,6 +383,29 @@ If you want to disable pagination for a particular table, you can pass the value
 If you want to disable pagination completely just set `PAGE_SIZE` to `None` in your `REST_FRAMEWORK` settings dictionary and disable paging on your DataTable options (by setting `paging` to `false`).
 
 
+Counting rows
+-------------
+
+Each response reports ``recordsTotal`` and ``recordsFiltered``, which the filter backends get from two methods you can override.
+On a very large table, where counting rows is expensive, they can return a cached count or an estimate instead:
+
+.. code:: python
+
+    from rest_framework_datatables.filters import DatatablesFilterBackend
+
+
+    class EstimatedCountFilterBackend(DatatablesFilterBackend):
+        def get_queryset_count_before(self, request, queryset, view):
+            # the number of rows before filtering
+            ...
+
+        def get_queryset_count_after(self, request, queryset, view):
+            # the number of rows left once filtered
+            ...
+
+Both ``rest_framework_datatables.filters.DatatablesFilterBackend`` and ``rest_framework_datatables.django_filters.backends.DatatablesFilterBackend`` call them.
+
+
 Using DataTables via POST method
 --------------------------------
 

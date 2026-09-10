@@ -101,18 +101,3 @@ class DatatablesFilterBackend(filters.DatatablesBaseFilterBackend,
                            + lookup)
         self.append_additional_ordering(ret, view)
         return ret
-
-    def get_queryset_count_before(self, request, queryset, view):
-        """
-        Provide an overrideable method to return a custom count.
-        This can be useful for very large tables, as calls to model.count()
-        can be very expensive.
-        """
-        return queryset.count()
-
-    def get_queryset_count_after(self, request, queryset, view):
-        """
-        See
-        :meth:`~rest_framework_datatables.django_filters.backends.DatatablesFilterBackend.get_queryset_count_before`.
-        """
-        return queryset.count()
