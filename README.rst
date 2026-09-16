@@ -20,11 +20,13 @@ You can play with a demo of the example app on `Python Anywhere <https://izimobi
 Requirements
 ------------
 
-- Python (3.8, 3.9, 3.10, 3.11, 3.12)
-- Django (3.2, 4.1, 4.2)
-- Django REST Framework (3.14)
+- Python (3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14)
+- Django (3.2, 4.1, 4.2, 5.0, 5.1, 5.2, 6.0, 6.1)
+- Django REST Framework (3.14 and later)
 
 We highly recommend and only officially support the latest patch release of each Python, Django and Django Rest Framework series.
+
+The test suite runs on every pull request and every push to master, against each Python version that each of those Django releases supports, with the newest Django REST Framework and django-filter releases that support that Django, and once more with the oldest supported releases of both on Django 3.2. A scheduled workflow also runs it against Django's ``main`` branch.
 
 Quickstart
 ----------
