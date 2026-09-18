@@ -1,12 +1,15 @@
 import operator
 import re
+import sys
 from functools import reduce
 
+import django
 from django.core.exceptions import FieldDoesNotExist
 from django.db.models import (
     F, ForeignObjectRel, Max, Min, OuterRef, Q, Subquery)
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import OrderBy
+from django.db.models.functions import Random
 from rest_framework.filters import BaseFilterBackend
 
 from .utils import get_param
@@ -213,6 +216,118 @@ def ordering_lookups(term):
     return lookups
 
 
+def is_random(term):
+    """helper function that tells if an ordering term orders randomly"""
+    if isinstance(term, OrderBy):
+        term = term.expression
+    return term == '?' or isinstance(term, Random)
+
+
+def adds_compared_column(query, term):
+    """helper function that tells if an ordering column changes the rows
+
+    DISTINCT compares the ordering columns too, and GROUP BY groups by
+    them. The columns of an object include its primary key, so only a
+    random order makes its rows distinct; a values() projection also
+    gains any column it does not select.
+
+    """
+    if is_random(term):
+        return True
+    if not query.values_select:
+        return False
+    selected = set(query.values_select) | set(query.annotation_select)
+    return not set(ordering_lookups(term)) <= selected
+
+
+def query_ordering(query):
+    """helper function that gives the ordering a query returns rows in
+
+    From Django 4.0 on, the model's default ordering is left out of a
+    GROUP BY query; before, it still groups by the ordering's columns.
+
+    """
+    if query.order_by:
+        return query.order_by
+    if not query.default_ordering:
+        return ()
+    if query.group_by is not None and django.VERSION >= (4, 0):
+        return ()
+    return query.get_meta().ordering
+
+
+def ordering_changes_rows(queryset):
+    """helper function that tells if a queryset's ordering adds rows
+
+    Ordering across a to-many relation joins every related row, and
+    with DISTINCT or GROUP BY, Django also selects the ordering columns,
+    which can split rows that would otherwise be one. DISTINCT ON
+    decides the rows itself.
+
+    """
+    query = queryset.query
+    if query.distinct_fields:
+        return False
+    compared = query.distinct or query.group_by is not None
+    for term in query_ordering(query):
+        if any(is_to_many(queryset.model, lookup)
+               for lookup in ordering_lookups(term)):
+            return True
+        if compared and adds_compared_column(query, term):
+            return True
+    return False
+
+
+def count_rows(queryset):
+    """helper function that counts the rows a queryset returns
+
+    count() drops the ordering, which is right unless the ordering adds
+    rows; then the queryset is counted with its ordering, which Django
+    keeps when the queryset is sliced.
+
+    """
+    if not ordering_changes_rows(queryset):
+        return queryset.count()
+    if queryset.query.values_select:
+        queryset = with_named_ordering(queryset)
+    return queryset[:sys.maxsize].count()
+
+
+def with_named_ordering(queryset):
+    """helper function that orders a values() queryset by named columns
+
+    A selected column can share its name with a column the queryset is
+    ordered by, such as a name across a relation, which Postgres cannot
+    tell apart once the ordered queryset is counted. Each ordering field
+    is selected under a name of its own and ordered by that instead.
+
+    """
+    aliases = {}
+    order_by = []
+    for term in query_ordering(queryset.query):
+        if not isinstance(term, str) or is_random(term):
+            order_by.append(term)
+            continue
+        name = unused_name(queryset.query, len(aliases))
+        aliases[name] = F(term.lstrip('-'))
+        order_by.append(('-' if term.startswith('-') else '') + name)
+    return queryset.annotate(**aliases).order_by(*order_by)
+
+
+def counted_as_sorted(queryset, ordering):
+    """helper function that gives the queryset to count for a sorted table
+
+    The sort replaces the queryset's own ordering, and adds no rows
+    unless DISTINCT compares what it sorts by, so the queryset is counted
+    without an ordering, which keeps the sort out of the count.
+
+    """
+    if not ordering:
+        return queryset
+    ordered = order_by_one_value(queryset, ordering)
+    return ordered if ordering_changes_rows(ordered) else queryset.order_by()
+
+
 class DatatablesBaseFilterBackend(BaseFilterBackend):
     """Base class for definining your own DatatablesFilterBackend classes"""
 
@@ -352,29 +467,27 @@ class DatatablesFilterBackend(DatatablesBaseFilterBackend):
         if not self.check_renderer_format(request):
             return queryset
 
-        total_count = view.get_queryset().count()
-        self.set_count_before(view, total_count)
-
-        if len(getattr(view, 'filter_backends', [])) > 1:
-            # case of a view with more than 1 filter backend
-            filtered_count_before = queryset.count()
-        else:
-            filtered_count_before = total_count
-
         datatables_query = self.parse_datatables_query(request, view)
+        ordering = self.get_ordering(request, view, datatables_query['fields'])
+
+        total_count = count_rows(
+            counted_as_sorted(view.get_queryset(), ordering))
+        self.set_count_before(view, total_count)
+        # another filter backend on the view may have changed the rows
+        unchanged = len(getattr(view, 'filter_backends', [])) <= 1
 
         q = self.get_q(datatables_query)
         if q:
             queryset = queryset.filter(q).distinct()
-            filtered_count = queryset.count()
+            unchanged = False
+        if not unchanged:
+            filtered_count = count_rows(counted_as_sorted(queryset, ordering))
         else:
-            filtered_count = filtered_count_before
+            filtered_count = total_count
         self.set_count_after(view, filtered_count)
 
-        ordering = self.get_ordering(request, view, datatables_query['fields'])
         if ordering:
             queryset = order_by_one_value(queryset, ordering)
-
         return queryset
 
     def get_q(self, datatables_query):

@@ -22,11 +22,16 @@ class DatatablesFilterBackend(filters.DatatablesBaseFilterBackend,
         if not self.check_renderer_format(request):
             return queryset
 
-        count = self.get_queryset_count_before(request, view.get_queryset(), view)
-        self.set_count_before(view, count)
-
         # parsed datatables_query will be an attribute of the filterset
         filterset = self.get_filterset(request, queryset, view)
+        ordering = [] if filterset is None else self.get_ordering(
+            request, view, filterset)
+
+        count = self.get_queryset_count_before(
+            request, filters.counted_as_sorted(view.get_queryset(), ordering),
+            view)
+        self.set_count_before(view, count)
+
         if filterset is None:
             count = self.get_queryset_count_after(request, queryset, view)
             self.set_count_after(view, count)
@@ -40,14 +45,13 @@ class DatatablesFilterBackend(filters.DatatablesBaseFilterBackend,
             queryset = queryset.filter(global_q).distinct()
 
         count = self.get_queryset_count_after(
-            request, queryset, view
+            request, filters.counted_as_sorted(queryset, ordering), view
         )
         self.set_count_after(view, count)
 
         # TODO Can we use OrderingFilter, maybe in DatatablesFilterSet, by
         # default? See
         # https://django-filter.readthedocs.io/en/master/ref/filters.html#ordering-filter
-        ordering = self.get_ordering(request, view, filterset)
         if ordering:
             queryset = filters.order_by_one_value(queryset, ordering)
 
@@ -106,11 +110,11 @@ class DatatablesFilterBackend(filters.DatatablesBaseFilterBackend,
         This can be useful for very large tables, as calls to model.count()
         can be very expensive.
         """
-        return queryset.count()
+        return filters.count_rows(queryset)
 
     def get_queryset_count_after(self, request, queryset, view):
         """
         See
         :meth:`~rest_framework_datatables.django_filters.backends.DatatablesFilterBackend.get_queryset_count_before`.
         """
-        return queryset.count()
+        return filters.count_rows(queryset)

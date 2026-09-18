@@ -1,21 +1,24 @@
 from types import SimpleNamespace
+from unittest import skipUnless
 
+import django
 from albums.models import Album, Artist
 
+from django.db import connection
 from django.contrib.contenttypes.fields import GenericRel
 from django.db.models import Case, Count, F, Q, Sum, Value, When, Window
 from django.db.models.fields.reverse_related import OneToOneRel
-from django.db.models.functions import Lower, RowNumber
+from django.db.models.functions import Lower, Random, RowNumber
 from django.test import TestCase
-from django.test.utils import override_settings
+from django.test.utils import CaptureQueriesContext, override_settings
 from django.urls import path
 
 from rest_framework import serializers
 from rest_framework.generics import ListAPIView
 
 from rest_framework_datatables.filters import (
-    DatatablesFilterBackend, is_to_many, order_by_one_value,
-    ordering_lookups, repeats_objects)
+    DatatablesFilterBackend, count_rows, is_to_many, order_by_one_value,
+    ordering_changes_rows, ordering_lookups, repeats_objects)
 from rest_framework_datatables.pagination import (
     DatatablesLimitOffsetPagination, DatatablesPageNumberPagination)
 
@@ -51,11 +54,29 @@ QUERYSETS = {
     'all': lambda: Album.objects.all(),
     'duplicated_by_filter':
         lambda: Album.objects.filter(genres__name__icontains='rock'),
+    'ordered_by_alias': lambda: Album.objects.alias(
+        genre=F('genres__name')).order_by('genre'),
+    'ordered_by_relation': lambda: Album.objects.order_by('genres'),
     'joined_by_extra': lambda: Album.objects.extra(
         tables=['albums_album_genres'],
         where=['albums_album_genres.album_id = albums_album.id']),
     'windowed': lambda: Album.objects.annotate(nth=Window(
         RowNumber(), partition_by=[F('artist')], order_by=F('year').asc())),
+    'values_selected': lambda: Album.objects.values('name', 'year').distinct(),
+    'values_ordered_by_to_many':
+        lambda: Album.objects.values('name').order_by('genres__name'),
+    'distinct_on': lambda: Album.objects.values('name').order_by(
+        'name', 'genres__name').distinct('name'),
+    'values_with_model_ordering':
+        lambda: Album.objects.values('artist').distinct(),
+    'ordered_by_to_many':
+        lambda: Album.objects.filter(
+            genres__name__icontains='o').distinct().order_by('genres__name'),
+    'ordered_randomly': lambda: Album.objects.order_by('?'),
+    'values_of_to_many':
+        lambda: Album.objects.values('genres__name').distinct(),
+    'values_grouped': lambda: Album.objects.values('artist').annotate(
+        albums=Count('pk')).order_by('name'),
 }
 PAGINATIONS = {
     'page': DatatablesPageNumberPagination,
@@ -99,6 +120,16 @@ if DjangoFilterBackend is not None:
     urlpatterns += [
         path(f'api/{pagination}/djangofilter/', view(
             'all', pagination, DjangoFilterBackend,
+            filterset_class=AlbumGenreFilter))
+        for pagination in PAGINATIONS
+    ] + [
+        path(f'api/{pagination}/djangofilter/values/', view(
+            'values_with_model_ordering', pagination, DjangoFilterBackend,
+            filterset_class=AlbumGenreFilter))
+        for pagination in PAGINATIONS
+    ] + [
+        path(f'api/{pagination}/djangofilter/ordered/', view(
+            'ordered_by_relation', pagination, DjangoFilterBackend,
             filterset_class=AlbumGenreFilter))
         for pagination in PAGINATIONS
     ]
@@ -197,7 +228,8 @@ class TestOrderingByToManyColumn(DistinctCountsTestCase):
         an alias across a to-many relation, shows the same rows sorted.
 
         """
-        for endpoint in ('duplicated_by_filter', 'joined_by_extra'):
+        for endpoint in ('duplicated_by_filter', 'ordered_by_alias',
+                         'joined_by_extra'):
             for direction in ('asc', 'desc'):
                 with self.subTest(endpoint=endpoint, direction=direction):
                     self.assert_sorting_keeps_the_rows(
@@ -233,6 +265,98 @@ class TestOrderingByToManyColumn(DistinctCountsTestCase):
         self.assertEqual(rows[0], 'Blonde on Blonde')
 
 
+@override_settings(ROOT_URLCONF=__name__)
+class TestCountingTheRowsReturned(DistinctCountsTestCase):
+    """recordsFiltered is the number of rows the table can page through
+
+    Django adds the ordering columns to SELECT DISTINCT, so a distinct
+    queryset ordered by a column it does not select, or any queryset
+    ordered across a to-many relation, can return more rows than
+    count() reports, and the rows past the count were never shown.
+
+    """
+    paginations = {'page': DatatablesPageNumberPagination}
+
+    def test_total_counts_the_rows_shown(self):
+        """recordsTotal counts the rows the sorted table shows
+
+        The sort replaces the view's ordering, so an ordering of the view
+        that repeated rows no longer counts towards the total.
+
+        """
+        endpoints = ['ordered_by_relation']
+        if DjangoFilterBackend is not None:
+            endpoints.append('djangofilter/ordered')
+        for endpoint in endpoints:
+            for pagination in PAGINATIONS:
+                with self.subTest(endpoint=endpoint, pagination=pagination):
+                    url = (f'/api/{pagination}/{endpoint}/?format=datatables'
+                           + COLUMNS + BY_NAME)
+                    rows, count = self.rows(url)
+                    total = self.client.get(
+                        url + '&length=10').json()['recordsTotal']
+                    self.assertEqual(total, len(rows))
+
+    def test_leaves_the_sort_out_of_the_count(self):
+        """The count does not pay for the value a to-many column sorts by"""
+        for pagination in PAGINATIONS:
+            with self.subTest(pagination=pagination):
+                with CaptureQueriesContext(connection) as queries:
+                    self.client.get(
+                        f'/api/{pagination}/all/?format=datatables&length=10'
+                        + COLUMNS + '&search[value]=o' + BY_GENRE % 'asc')
+                counts = [query['sql'] for query in queries.captured_queries
+                          if 'COUNT(' in query['sql'].upper()]
+                self.assertTrue(counts)
+                for sql in counts:
+                    self.assertNotIn('MIN(', sql.upper())
+
+    def test_values_sorted_by_to_many(self):
+        """A projection sorted across a to-many relation counts its rows
+
+        Its selected columns can share a name with the related column it
+        is sorted by, which a count must keep apart.
+
+        """
+        self.assert_counts_the_rows('values_selected', BY_GENRE % 'asc')
+        self.assert_counts_the_rows(
+            'values_ordered_by_to_many', '&search[value]=o')
+
+    def test_grouped_values_sorted_by_another_column(self):
+        """Grouping gains the column a grouped projection is sorted by"""
+        self.assert_counts_the_rows('values_grouped', BY_NAME)
+
+    @skipUnless(connection.features.can_distinct_on_fields,
+                'DISTINCT ON is not supported')
+    def test_distinct_on(self):
+        """DISTINCT ON decides the rows, whatever the ordering joins"""
+        self.assert_counts_the_rows('distinct_on')
+
+    def test_view_ordered_by_to_many_then_sorted(self):
+        """Sorting replaces an ordering of the view that added rows"""
+        self.assert_counts_the_rows('ordered_by_relation', BY_NAME)
+
+    def test_values_with_model_ordering(self):
+        self.assert_counts_the_rows('values_with_model_ordering')
+
+    def test_ordered_by_to_many(self):
+        self.assert_counts_the_rows('ordered_by_to_many')
+
+    def test_ordered_randomly_and_searched(self):
+        self.assert_counts_the_rows('ordered_randomly', '&search[value]=o')
+
+    def test_values_of_to_many(self):
+        self.assert_counts_the_rows('values_of_to_many')
+
+    def test_values_grouped_and_searched(self):
+        self.assert_counts_the_rows('values_grouped', '&search[value]=o')
+
+    def test_django_filter_backend(self):
+        if DjangoFilterBackend is None:  # pragma: no cover
+            self.skipTest('django-filter not available')
+        self.assert_counts_the_rows('djangofilter/values')
+
+
 class TestIsToMany(TestCase):
     def test_lookups(self):
         for model, lookup, expected in (
@@ -246,6 +370,69 @@ class TestIsToMany(TestCase):
                 (Album, 'not_a_field', False)):
             with self.subTest(lookup=lookup):
                 self.assertIs(is_to_many(model, lookup), expected)
+
+
+class TestOrderingChangesRows(TestCase):
+    """Only the querysets whose ordering adds rows pay for counting it"""
+
+    def test_querysets(self):
+        searched = Q(name__icontains='o') | Q(genres__name__icontains='o')
+        for name, queryset, expected in (
+                ('model ordering', Album.objects.all(), False),
+                ('model ordering, searched',
+                 Album.objects.filter(searched).distinct(), False),
+                ('ordered by a to-one relation, searched',
+                 Album.objects.filter(searched).distinct()
+                 .order_by('artist__name'), False),
+                ('values ordered by a selected column',
+                 Album.objects.values('name').distinct(), False),
+                ('grouped, ordered by its annotation',
+                 Album.objects.values('artist').annotate(albums=Count('pk'))
+                 .distinct().order_by('albums'), False),
+                ('unordered values', Album.objects.values('artist')
+                 .distinct().order_by(), False),
+                ('ordered by an expression, searched',
+                 Album.objects.filter(searched).distinct()
+                 .order_by(F('year').desc()), False),
+                ('ordered randomly by an expression, searched',
+                 Album.objects.filter(searched).distinct()
+                 .order_by(Random()), True),
+                ('values ordered by an expression of an unselected column',
+                 Album.objects.values('name').distinct()
+                 .order_by(F('year').desc()), True),
+                ('values ordered by an expression of a selected column',
+                 Album.objects.values('name', 'year').distinct()
+                 .order_by(F('year').desc()), False),
+                ('ordered by an expression',
+                 Album.objects.order_by(F('year').desc()), False),
+                ('ordered by a to-many relation',
+                 Album.objects.order_by('genres__name'), True),
+                ('ordered by an expression across a to-many relation',
+                 Album.objects.order_by(F('genres__name').asc()), True),
+                ('ordered by a bare F across a to-many relation',
+                 Album.objects.order_by(F('genres__name')), True),
+                ('ordered by a bare F', Album.objects.order_by(F('year')),
+                 False),
+                ('ordered by a case across a to-many relation',
+                 Album.objects.order_by(Case(
+                     When(genres__name='Pop Rock', then=Value(0)),
+                     default=Value(1))), True),
+                ('distinct on, ordered by a to-many relation',
+                 Album.objects.values('name').order_by('name', 'genres__name')
+                 .distinct('name'), False),
+                ('grouped, where Django 4.0 leaves the model ordering out',
+                 Album.objects.values('artist').annotate(albums=Count('pk')),
+                 django.VERSION < (4, 0)),
+                ('grouped, ordered by a column it does not group by',
+                 Album.objects.values('artist').annotate(albums=Count('pk'))
+                 .order_by('name'), True),
+                ('values with model ordering',
+                 Album.objects.values('artist').distinct(), True),
+                ('ordered randomly, searched',
+                 Album.objects.filter(searched).distinct().order_by('?'),
+                 True)):
+            with self.subTest(name):
+                self.assertIs(ordering_changes_rows(queryset), expected)
 
 
 class TestOrderByOneValue(TestCase):
@@ -319,6 +506,36 @@ class TestOrderByOneValue(TestCase):
             with self.subTest(term=term):
                 queryset = order_by_one_value(Album.objects.all(), [term])
                 self.assertEqual(queryset.query.order_by, (term,))
+
+
+class TestCountRows(TestCase):
+    """count_rows counts the rows a queryset returns"""
+
+    fixtures = ['test_data']
+
+    def test_querysets(self):
+        searched = Q(name__icontains='o') | Q(genres__name__icontains='o')
+        for name, queryset in (
+                ('model ordering', Album.objects.all()),
+                ('ordered by a to-many relation',
+                 Album.objects.order_by('genres__name')),
+                ('values ordered by a to-many relation',
+                 Album.objects.values('name').order_by('genres__name')),
+                ('distinct values ordered by a to-many relation',
+                 Album.objects.values('name', 'year').distinct()
+                 .order_by('-genres__name')),
+                ('distinct values ordered randomly',
+                 Album.objects.values('artist').distinct().order_by('?')),
+                ('distinct values ordered by an expression',
+                 Album.objects.values('artist').distinct()
+                 .order_by(F('year').desc())),
+                ('grouped with a model ordering',
+                 Album.objects.values('artist').annotate(albums=Count('pk'))),
+                ('searched and ordered randomly',
+                 Album.objects.filter(searched).distinct().order_by('?'))):
+            with self.subTest(name):
+                self.assertEqual(
+                    count_rows(queryset), len(list(queryset.all())))
 
 
 class TestOrderingLookups(TestCase):
