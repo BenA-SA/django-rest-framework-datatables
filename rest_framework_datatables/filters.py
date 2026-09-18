@@ -3,7 +3,8 @@ import re
 from functools import reduce
 
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import F, ForeignObjectRel, Max, Min, Q
+from django.db.models import (
+    F, ForeignObjectRel, Max, Min, OuterRef, Q, Subquery)
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import OrderBy
 from rest_framework.filters import BaseFilterBackend
@@ -104,12 +105,19 @@ def one_value_ordering(queryset, term, name):
     descending. The value comes from the
     rows the queryset keeps, so a search on the relation orders by the
     values it matched. It is an aggregate, added with alias() so a count
-    leaves it out.
+    leaves it out, unless grouping would merge rows the queryset
+    returns; a subquery then takes the value for each row, once per row.
 
     """
     descending = term.startswith('-')
     aggregate = (Max if descending else Min)(term.lstrip('-'))
-    return {name: aggregate}, OrderBy(F(name), descending=descending)
+    if aggregates_safely(queryset.query):
+        ordered = OrderBy(F(name), descending=descending)
+        return {name: aggregate}, ordered
+    values = queryset.order_by().filter(pk=OuterRef('pk')).values('pk')
+    values = values.annotate(_datatables_value=aggregate)
+    subquery = Subquery(values.values('_datatables_value'))
+    return {}, OrderBy(subquery, descending=descending)
 
 
 def unused_name(query, position):
@@ -126,13 +134,11 @@ def order_by_one_value(queryset, ordering):
     Ordering by a field across a to-many relation joins every related
     row, so each row came back once per related object. Such a field is
     ordered by one related value instead, leaving the rows as the
-    queryset returns them, so only when grouping by object keeps them.
-    Otherwise, as for a values() queryset, whose rows are not objects,
-    the ordering is kept as given.
+    queryset returns them. A
+    values() queryset, whose rows are not objects, is ordered as given.
 
     """
-    query = queryset.query
-    if query.values_select or not aggregates_safely(query):
+    if queryset.query.values_select:
         return queryset.order_by(*ordering)
     annotations = {}
     order_by = []

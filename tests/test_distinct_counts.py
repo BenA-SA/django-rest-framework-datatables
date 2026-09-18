@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from albums.models import Album, Artist
 
 from django.contrib.contenttypes.fields import GenericRel
-from django.db.models import Count, F, Sum, Window
+from django.db.models import Count, F, Q, Sum, Window
 from django.db.models.fields.reverse_related import OneToOneRel
 from django.db.models.functions import RowNumber
 from django.test import TestCase
@@ -38,6 +38,13 @@ class RowSerializer(serializers.BaseSerializer):
 
 QUERYSETS = {
     'all': lambda: Album.objects.all(),
+    'duplicated_by_filter':
+        lambda: Album.objects.filter(genres__name__icontains='rock'),
+    'joined_by_extra': lambda: Album.objects.extra(
+        tables=['albums_album_genres'],
+        where=['albums_album_genres.album_id = albums_album.id']),
+    'windowed': lambda: Album.objects.annotate(nth=Window(
+        RowNumber(), partition_by=[F('artist')], order_by=F('year').asc())),
 }
 PAGINATIONS = {
     'page': DatatablesPageNumberPagination,
@@ -108,6 +115,16 @@ class DistinctCountsTestCase(TestCase):
                 rows, count = self.rows(url)
                 self.assertEqual(count, len(rows))
 
+    def assert_sorting_keeps_the_rows(self, endpoint, query, search=''):
+        self.assert_counts_the_rows(endpoint, search + query)
+        for pagination in PAGINATIONS:
+            with self.subTest(pagination=pagination):
+                url = (f'/api/{pagination}/{endpoint}/?format=datatables'
+                       + COLUMNS + search)
+                unsorted, count = self.rows(url)
+                rows, count = self.rows(url + query)
+                self.assertEqual(sorted(rows), sorted(unsorted))
+
     def assert_each_row_once(self, endpoint, query=''):
         self.assert_counts_the_rows(endpoint, query)
         for pagination in PAGINATIONS:
@@ -148,6 +165,24 @@ class TestOrderingByToManyColumn(DistinctCountsTestCase):
             with self.subTest(direction=direction):
                 self.assert_each_row_once(
                     'djangofilter', BY_GENRE % direction)
+
+    def test_keeps_rows_the_view_duplicates(self):
+        """Sorting changes the order of the rows, never which rows
+
+        A view whose queryset already repeats a row, through a filter or
+        an alias across a to-many relation, shows the same rows sorted.
+
+        """
+        for endpoint in ('duplicated_by_filter', 'joined_by_extra'):
+            for direction in ('asc', 'desc'):
+                with self.subTest(endpoint=endpoint, direction=direction):
+                    self.assert_sorting_keeps_the_rows(
+                        endpoint, BY_GENRE % direction)
+
+    def test_keeps_rows_a_window_numbers(self):
+        """A window numbers each row before the search makes them distinct"""
+        self.assert_sorting_keeps_the_rows(
+            'windowed', BY_GENRE % 'asc', '&search[value]=o')
 
     def test_orders_by_the_value_that_matched(self):
         """A search on the column orders by the related value it matched
@@ -192,6 +227,31 @@ class TestOrderByOneValue(TestCase):
                 self.assertEqual(len(names), Album.objects.count())
                 self.assertEqual(len(names), len(set(names)))
 
+    def test_orders_unique_rows_by_an_aggregate(self):
+        """A subquery is only used where the view's joins repeat rows
+
+        A correlated subquery runs once per row, so rows that are already
+        one per object, with no joins or with DISTINCT, are ordered by an
+        aggregate instead.
+
+        """
+        searched = Q(name__icontains='o') | Q(genres__name__icontains='o')
+        for name, queryset, subqueries in (
+                ('no joins', Album.objects.all(), 0),
+                ('distinct', Album.objects.filter(searched).distinct(), 0),
+                ('to-one join',
+                 Album.objects.filter(artist__name__icontains='a'), 0),
+                ('own aggregate',
+                 Album.objects.annotate(total=Sum('rank')), 1),
+                ('extra column',
+                 Album.objects.extra(select={'double': 'rank * 2'}), 1),
+                ('repeated rows',
+                 Album.objects.filter(genres__name__icontains='rock'), 1)):
+            with self.subTest(name):
+                ordered = order_by_one_value(queryset, ['genres__name'])
+                sql = str(ordered.query)
+                self.assertEqual(sql.count('SELECT') - 1, subqueries)
+
     def test_leaves_projections_as_they_are(self):
         """values() and grouped querysets keep the ordering as given"""
         for queryset in (
@@ -211,20 +271,6 @@ class TestOrderByOneValue(TestCase):
         self.assertEqual(
             sorted(album._datatables_order_0 for album in ordered),
             sorted(Album.objects.values_list('year', flat=True)))
-
-    def test_keeps_the_ordering_where_grouping_merges_rows(self):
-        """Grouping by object would merge rows these querysets return"""
-        for name, queryset in (
-                ('repeated rows',
-                 Album.objects.filter(genres__name__icontains='rock')),
-                ('own aggregate', Album.objects.annotate(total=Sum('rank'))),
-                ('extra column',
-                 Album.objects.extra(select={'double': 'rank * 2'})),
-                ('window', Album.objects.annotate(nth=Window(
-                    RowNumber(), partition_by=[F('artist')])))):
-            with self.subTest(name):
-                ordered = order_by_one_value(queryset, ['genres__name'])
-                self.assertEqual(ordered.query.order_by, ('genres__name',))
 
     def test_other_terms_are_kept(self):
         for term in ('name', '-year', F('year').desc(), '?'):
