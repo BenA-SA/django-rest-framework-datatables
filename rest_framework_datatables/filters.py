@@ -50,6 +50,27 @@ def is_to_many(model, lookup):
     return False
 
 
+def related_ordering(model, lookup):
+    """helper function that spells out how Django orders a relation
+
+    Ordering by a relation itself orders by the related model's first
+    ordering field, or its primary key. Returns the lookup to order by,
+    and whether that field orders descending.
+
+    """
+    for part in lookup.split(LOOKUP_SEP):
+        try:
+            field = model._meta.get_field(part)
+        except FieldDoesNotExist:
+            return lookup, False
+        if not field.is_relation:
+            return lookup, False
+        model = field.related_model
+    ordering = [term for term in model._meta.ordering if isinstance(term, str)]
+    first = ordering[0] if ordering else 'pk'
+    return lookup + LOOKUP_SEP + first.lstrip('-'), first.startswith('-')
+
+
 def repeats_objects(query):
     """helper function that tells if a query's joins can repeat an object
 
@@ -109,8 +130,9 @@ def one_value_ordering(queryset, term, name):
     returns; a subquery then takes the value for each row, once per row.
 
     """
-    descending = term.startswith('-')
-    aggregate = (Max if descending else Min)(term.lstrip('-'))
+    lookup, flipped = related_ordering(queryset.model, term.lstrip('-'))
+    descending = term.startswith('-') != flipped
+    aggregate = (Max if descending else Min)(lookup)
     if aggregates_safely(queryset.query):
         ordered = OrderBy(F(name), descending=descending)
         return {name: aggregate}, ordered

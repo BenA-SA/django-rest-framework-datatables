@@ -95,6 +95,7 @@ COLUMNS = (
 )
 BY_GENRE = '&order[0][column]=1&order[0][dir]=%s'
 BY_NAME = '&order[0][column]=0&order[0][dir]=asc'
+BY_RELATION = '&order[0][column]=2&order[0][dir]=asc'
 
 
 class DistinctCountsTestCase(TestCase):
@@ -184,6 +185,17 @@ class TestOrderingByToManyColumn(DistinctCountsTestCase):
         self.assert_sorting_keeps_the_rows(
             'windowed', BY_GENRE % 'asc', '&search[value]=o')
 
+    def test_orders_a_relation_by_its_model_ordering(self):
+        """A column of the relation itself sorts as Django sorts it
+
+        Django orders by a relation using the related model's ordering,
+        so genres by name, not by primary key.
+
+        """
+        url = '/api/page/all/?format=datatables' + COLUMNS + BY_RELATION
+        rows, count = self.rows(url)
+        self.assertEqual(rows[0], 'The Velvet Underground & Nico')
+
     def test_orders_by_the_value_that_matched(self):
         """A search on the column orders by the related value it matched
 
@@ -220,7 +232,8 @@ class TestOrderByOneValue(TestCase):
 
     def test_terms(self):
         for term in (
-                'genres__name', '-genres__name'):
+                'genres__name', '-genres__name',
+                'genres', '-genres', 'genres__pk'):
             with self.subTest(term=term):
                 names = [album.name for album in
                          order_by_one_value(Album.objects.all(), [term])]
