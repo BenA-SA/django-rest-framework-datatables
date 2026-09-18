@@ -3,9 +3,9 @@ from types import SimpleNamespace
 from albums.models import Album, Artist
 
 from django.contrib.contenttypes.fields import GenericRel
-from django.db.models import Count, F, Q, Sum, Window
+from django.db.models import Case, Count, F, Q, Sum, Value, When, Window
 from django.db.models.fields.reverse_related import OneToOneRel
-from django.db.models.functions import RowNumber
+from django.db.models.functions import Lower, RowNumber
 from django.test import TestCase
 from django.test.utils import override_settings
 from django.urls import path
@@ -15,7 +15,7 @@ from rest_framework.generics import ListAPIView
 
 from rest_framework_datatables.filters import (
     DatatablesFilterBackend, is_to_many, order_by_one_value,
-    repeats_objects)
+    ordering_lookups, repeats_objects)
 from rest_framework_datatables.pagination import (
     DatatablesLimitOffsetPagination, DatatablesPageNumberPagination)
 
@@ -27,6 +27,17 @@ try:
         DatatablesFilterSet)
 except ImportError:  # pragma: no cover
     DjangoFilterBackend = None
+
+
+class NullsLastFilterBackend(DatatablesFilterBackend):
+    """Order with expressions, as in #118, to place nulls last"""
+
+    def get_ordering(self, request, view, fields):
+        return [
+            F(field['name'][0]).desc(nulls_last=True) if dir_ == 'desc'
+            else F(field['name'][0]).asc(nulls_last=True)
+            for field, dir_ in self.get_ordering_fields(request, view, fields)
+        ]
 
 
 class RowSerializer(serializers.BaseSerializer):
@@ -68,6 +79,12 @@ urlpatterns = [
 ] + [
     path(f'api/{pagination}/additional/', view(
         'all', pagination, datatables_additional_order_by='genres__name'))
+    for pagination in PAGINATIONS
+]
+
+urlpatterns += [
+    path(f'api/{pagination}/expressions/', view(
+        'all', pagination, NullsLastFilterBackend))
     for pagination in PAGINATIONS
 ]
 
@@ -167,6 +184,12 @@ class TestOrderingByToManyColumn(DistinctCountsTestCase):
                 self.assert_each_row_once(
                     'djangofilter', BY_GENRE % direction)
 
+    def test_ordering_expressions(self):
+        for direction in ('asc', 'desc'):
+            with self.subTest(direction=direction):
+                self.assert_each_row_once(
+                    'expressions', BY_GENRE % direction)
+
     def test_keeps_rows_the_view_duplicates(self):
         """Sorting changes the order of the rows, never which rows
 
@@ -233,7 +256,13 @@ class TestOrderByOneValue(TestCase):
     def test_terms(self):
         for term in (
                 'genres__name', '-genres__name',
-                'genres', '-genres', 'genres__pk'):
+                'genres', '-genres', 'genres__pk',
+                F('genres__name'),
+                F('genres__name').asc(nulls_last=True),
+                F('genres__name').desc(nulls_first=True),
+                Lower('genres__name').desc(),
+                Case(When(genres__name__icontains='rock', then=Value(0)),
+                     default=Value(1))):
             with self.subTest(term=term):
                 names = [album.name for album in
                          order_by_one_value(Album.objects.all(), [term])]
@@ -290,6 +319,18 @@ class TestOrderByOneValue(TestCase):
             with self.subTest(term=term):
                 queryset = order_by_one_value(Album.objects.all(), [term])
                 self.assertEqual(queryset.query.order_by, (term,))
+
+
+class TestOrderingLookups(TestCase):
+    def test_lookups_in_conditions(self):
+        term = Case(When(genres__name='Pop Rock', then=Value(0)),
+                    default=Value(1))
+        self.assertIn('genres__name', ordering_lookups(term))
+
+    def test_lookups_in_combined_conditions(self):
+        condition = (Q(name='x') | Q(genres__name='Pop Rock')) & Q(year=1)
+        term = Case(When(condition, then=Value(0)), default=Value(1))
+        self.assertIn('genres__name', ordering_lookups(term))
 
 
 class TestRepeatsObjects(TestCase):

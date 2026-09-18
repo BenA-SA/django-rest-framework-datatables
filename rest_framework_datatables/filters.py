@@ -123,23 +123,33 @@ def one_value_ordering(queryset, term, name):
 
     Returns the annotations to add and the ordering term to use in place
     of term: the lowest related value, or the highest when term is
-    descending. The value comes from the
+    descending, keeping where term places nulls. The value comes from the
     rows the queryset keeps, so a search on the relation orders by the
     values it matched. It is an aggregate, added with alias() so a count
     leaves it out, unless grouping would merge rows the queryset
     returns; a subquery then takes the value for each row, once per row.
 
     """
-    lookup, flipped = related_ordering(queryset.model, term.lstrip('-'))
-    descending = term.startswith('-') != flipped
-    aggregate = (Max if descending else Min)(lookup)
+    nulls = {}
+    if isinstance(term, str):
+        lookup, flipped = related_ordering(
+            queryset.model, term.lstrip('-'))
+        descending = term.startswith('-') != flipped
+        expression = F(lookup)
+    elif isinstance(term, OrderBy):
+        descending, expression = term.descending, term.expression
+        nulls = {'nulls_first': term.nulls_first,
+                 'nulls_last': term.nulls_last}
+    else:
+        descending, expression = False, term
+    aggregate = (Max if descending else Min)(expression)
     if aggregates_safely(queryset.query):
-        ordered = OrderBy(F(name), descending=descending)
+        ordered = OrderBy(F(name), descending=descending, **nulls)
         return {name: aggregate}, ordered
     values = queryset.order_by().filter(pk=OuterRef('pk')).values('pk')
     values = values.annotate(_datatables_value=aggregate)
     subquery = Subquery(values.values('_datatables_value'))
-    return {}, OrderBy(subquery, descending=descending)
+    return {}, OrderBy(subquery, descending=descending, **nulls)
 
 
 def unused_name(query, position):
@@ -154,9 +164,9 @@ def order_by_one_value(queryset, ordering):
     """helper function that orders a queryset without repeating its rows
 
     Ordering by a field across a to-many relation joins every related
-    row, so each row came back once per related object. Such a field is
-    ordered by one related value instead, leaving the rows as the
-    queryset returns them. A
+    row, so each row came back once per related object. Such a term is
+    ordered by one related value instead, whether it is a field name or
+    an expression, leaving the rows as the queryset returns them. A
     values() queryset, whose rows are not objects, is ordered as given.
 
     """
@@ -165,8 +175,8 @@ def order_by_one_value(queryset, ordering):
     annotations = {}
     order_by = []
     for term in ordering:
-        if not isinstance(term, str) or not is_to_many(
-                queryset.model, term.lstrip('-')):
+        if not any(is_to_many(queryset.model, lookup)
+                   for lookup in ordering_lookups(term)):
             order_by.append(term)
             continue
         name = unused_name(queryset.query, len(order_by))
@@ -176,6 +186,31 @@ def order_by_one_value(queryset, ordering):
     if annotations:
         queryset = queryset.alias(**annotations)
     return queryset.order_by(*order_by)
+
+
+def ordering_lookups(term):
+    """helper function that lists the field lookups an ordering term uses
+
+    An expression is searched for F() references and for the lookups of
+    its Q() conditions, such as those of a When() inside a Case().
+
+    """
+    if isinstance(term, str):
+        return [term.lstrip('-')]
+    if isinstance(term, F):
+        return [term.name]
+    lookups = []
+    if isinstance(term, Q):
+        for child in term.children:
+            if isinstance(child, tuple):
+                lookups.append(child[0])
+            else:
+                lookups.extend(ordering_lookups(child))
+        return lookups
+    for source in term.get_source_expressions():
+        if source is not None:
+            lookups.extend(ordering_lookups(source))
+    return lookups
 
 
 class DatatablesBaseFilterBackend(BaseFilterBackend):
