@@ -1,6 +1,7 @@
 from collections import OrderedDict
 
 from django.core.paginator import InvalidPage
+from django.db.models import QuerySet
 
 from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
@@ -14,6 +15,7 @@ try:
 except ImportError:
     text_type = str
 
+from .filters import count_rows
 from .utils import get_param
 
 
@@ -33,7 +35,7 @@ class DatatablesMixin(object):
             count = view._datatables_filtered_count
             del view._datatables_filtered_count
         else:  # pragma: no cover
-            count = queryset.count()
+            count = count_rows(queryset)
         if hasattr(view, '_datatables_total_count'):
             total_count = view._datatables_total_count
             del view._datatables_total_count
@@ -129,6 +131,14 @@ class DatatablesLimitOffsetPagination(DatatablesMixin, LimitOffsetPagination):
             return offset_value
         except (ValueError, TypeError):
             return 0
+
+    def get_count(self, queryset):
+        """count the rows a DataTables queryset returns, as sorted"""
+        if self.is_datatable_request and isinstance(queryset, QuerySet):
+            return count_rows(queryset)
+        return super(
+            DatatablesLimitOffsetPagination, self
+        ).get_count(queryset)
 
     def paginate_queryset(self, queryset, request, view=None):
         if request.accepted_renderer.format == 'datatables':

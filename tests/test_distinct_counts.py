@@ -65,6 +65,7 @@ QUERYSETS = {
     'values_selected': lambda: Album.objects.values('name', 'year').distinct(),
     'values_ordered_by_to_many':
         lambda: Album.objects.values('name').order_by('genres__name'),
+    'listed': lambda: list(Album.objects.all()),
     'distinct_on': lambda: Album.objects.values('name').order_by(
         'name', 'genres__name').distinct('name'),
     'values_with_model_ordering':
@@ -275,7 +276,6 @@ class TestCountingTheRowsReturned(DistinctCountsTestCase):
     count() reports, and the rows past the count were never shown.
 
     """
-    paginations = {'page': DatatablesPageNumberPagination}
 
     def test_total_counts_the_rows_shown(self):
         """recordsTotal counts the rows the sorted table shows
@@ -331,6 +331,11 @@ class TestCountingTheRowsReturned(DistinctCountsTestCase):
     def test_distinct_on(self):
         """DISTINCT ON decides the rows, whatever the ordering joins"""
         self.assert_counts_the_rows('distinct_on')
+
+    def test_limit_offset_paginates_a_list(self):
+        """A view may return a list, which has no query to count"""
+        response = self.client.get('/api/offset/listed/?format=json&limit=5')
+        self.assertEqual(response.json()['count'], Album.objects.count())
 
     def test_view_ordered_by_to_many_then_sorted(self):
         """Sorting replaces an ordering of the view that added rows"""
