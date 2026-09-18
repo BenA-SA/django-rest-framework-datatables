@@ -152,6 +152,20 @@ class TestFilterTestCase(TestCase):
             self.assertLess(queryset.count(), Album.objects.count())
             self.assertEqual(count_rows(queryset), queryset.count())
 
+    def test_count_rows_keeps_extra_select_columns(self):
+        """A distinct queryset is counted by the extra() columns it selects
+
+        A column from a to-many join makes rows distinct that share a
+        primary key, so counting by primary key would count too few.
+
+        """
+        queryset = Album.objects.filter(
+            genres__name__icontains='o'
+        ).extra(select={'genre_name': '"albums_genre"."name"'}).distinct()
+        self.assertGreater(
+            queryset.count(), queryset.order_by().values('pk').distinct().count())
+        self.assertEqual(count_rows(queryset), queryset.count())
+
     @override_settings(ROOT_URLCONF=__name__)
     def test_custom_count_unfiltered(self):
         """An overridden count after filtering is used on every draw"""

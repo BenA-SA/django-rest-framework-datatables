@@ -38,8 +38,9 @@ def count_rows(queryset):
     selected column, joined ones included; deduping the primary key
     alone gives the same number for much less work. Querysets using
     DISTINCT ON, selecting only some columns with values() or
-    values_list(), or carrying annotations that would change how rows
-    group, are counted as they were before.
+    values_list(), or selecting more with annotations or extra(), are
+    counted as they were before, since those columns decide which rows
+    are distinct.
 
     """
     countable_by_pk = (
@@ -47,6 +48,7 @@ def count_rows(queryset):
         and not queryset.query.distinct_fields
         and not queryset.query.values_select
         and not queryset.query.annotations
+        and not queryset.query.extra
     )
     if countable_by_pk:
         return queryset.order_by().values('pk').distinct().count()
